@@ -1,0 +1,54 @@
+name: News Monitor
+
+on:
+  schedule:
+    # Runs at the top of every hour. GitHub Actions schedules run in UTC.
+    - cron: "0 * * * *"
+  workflow_dispatch: {}   # lets you also trigger it manually from the Actions tab
+
+permissions:
+  contents: write   # needed so the workflow can commit the updated state file
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        env:
+          GUARDIAN_API_KEY: ${{ secrets.GUARDIAN_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMAIL_ENABLED: ${{ secrets.EMAIL_ENABLED }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python monitor.py
+
+      - name: Upload latest digest as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-digest
+          path: latest_digest.md
+
+      - name: Save state back to the repo
+        # This commits the updated seen_articles.json (and latest digest) so the
+        # next hourly run knows what's already been reported. Uses the built-in
+        # GITHUB_TOKEN, so no extra setup is needed.
+        run: |
+          git config user.name "news-monitor-bot"
+          git config user.email "actions@github.com"
+          git add seen_articles.json latest_digest.md
+          git diff --cached --quiet || git commit -m "Update monitor state [skip ci]"
+          git push

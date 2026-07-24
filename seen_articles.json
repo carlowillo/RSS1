@@ -1,0 +1,98 @@
+# Christian Concern News Monitor — Free Edition
+
+A hands-off news monitor that checks UK newspaper and Christian press RSS
+feeds every hour, flags articles relevant to your issues (assisted
+dying, abortion, Islam, religious liberty, etc.), and can post a digest
+to Slack and/or email it to you.
+
+**Cost: £0/month** for this version. It runs on GitHub's free Actions
+service, so nothing needs to be installed on your laptop and nothing
+needs to stay switched on.
+
+## What's in this folder
+
+| File | Purpose |
+|---|---|
+| `monitor.py` | The actual script — fetches feeds, classifies, sends alerts |
+| `feeds.yaml` | List of RSS feeds to check (edit this to add/remove sources) |
+| `issues.yaml` | Keyword lists per issue (edit this to tune what counts as relevant) |
+| `requirements.txt` | The one dependency needed (PyYAML) |
+| `.github/workflows/monitor.yml` | Tells GitHub to run the script every hour, for free |
+| `seen_articles.json` | Tracks which articles have already been reported (starts empty) |
+
+## One-time setup (15–20 minutes, no coding needed)
+
+1. **Create a free GitHub account** at github.com if you don't already have one.
+2. **Create a new repository** (Settings can be "Private" — that's fine, GitHub
+   Actions is still free on private repos for a generous monthly allowance).
+3. **Upload this whole folder** to that repository. Easiest way: on the
+   repo page, click "Add file" → "Upload files", drag in everything from
+   this folder (including the hidden `.github` folder — if your file
+   browser hides it, use GitHub Desktop or ask a colleague with basic git
+   familiarity to push it for you).
+4. **Get a free Guardian API key** (optional but recommended): register at
+   https://open-platform.theguardian.com/access/ — instant, free, no card.
+5. **Add your keys as repository secrets** (Settings → Secrets and
+   variables → Actions → "New repository secret"):
+   - `GUARDIAN_API_KEY` — from step 4
+   - `SLACK_WEBHOOK_URL` — if you want Slack alerts (see below)
+   - `EMAIL_ENABLED`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`,
+     `EMAIL_FROM`, `EMAIL_TO` — if you want email alerts (see below)
+   - `ANTHROPIC_API_KEY` — only if you want the optional AI-classification
+     upgrade later (not required to run this for free)
+6. That's it. GitHub will now run the check every hour automatically. You
+   can also trigger it manually any time from the repo's "Actions" tab →
+   "News Monitor" → "Run workflow".
+
+## Getting a free Slack webhook (optional)
+
+Slack → your workspace → "Apps" → search "Incoming Webhooks" → add to a
+channel → copy the webhook URL it gives you → paste that as the
+`SLACK_WEBHOOK_URL` secret above.
+
+## Getting email working (optional)
+
+Any SMTP-capable email account works. For a free Gmail account:
+- `SMTP_HOST` = smtp.gmail.com
+- `SMTP_PORT` = 465
+- `SMTP_USER` = your Gmail address
+- `SMTP_PASS` = a Gmail **App Password** (Google Account → Security →
+  2-Step Verification → App Passwords) — not your normal password
+- `EMAIL_ENABLED` = true
+- `EMAIL_FROM` / `EMAIL_TO` = the addresses to send from/to
+
+Ask your IT/comms team if they'd prefer to use the organisation's own
+email account instead of a personal Gmail — same settings, different host.
+
+## Tuning it
+
+- **Add more sources:** add entries to `feeds.yaml`. Most news sites'
+  RSS feeds are at `[site]/rss` or similar — search "[site name] RSS feed".
+- **Add more keywords:** edit `issues.yaml`. If you notice a relevant
+  article was missed, add the phrase that should have caught it (e.g.
+  a campaigner's name, a bill's short title).
+- **Paywalled titles (Times, Telegraph, FT):** these mostly don't publish
+  full RSS. A free workaround is Google News' search-RSS, e.g.:
+  `https://news.google.com/rss/search?q=abortion+site:thetimes.co.uk&hl=en-GB&gl=GB&ceid=GB:en`
+  Add one of these per issue/title combination you care about most.
+
+## Upgrading later (optional, not free)
+
+Keyword matching is simple and reliable but will occasionally miss
+articles that are relevant without using an obvious keyword, or flag
+ones that use a keyword in an unrelated context. If that becomes a real
+problem, add an `ANTHROPIC_API_KEY` secret (from console.anthropic.com)
+and the script will automatically use Claude to classify articles more
+intelligently instead of just keyword-matching — at a cost of roughly
+£10–£35/month at a few hundred articles/day. This is a one-secret
+change; no code editing required.
+
+## What this does NOT cover
+
+- **Paywalled full-text** (Times/Telegraph/FT article bodies) — only
+  headlines/snippets, by design, to stay within copyright limits.
+- **Social media (X, Facebook, etc.)** — this is the news half only.
+  The social monitoring half needs separate setup (see the earlier
+  report) because of API costs and access restrictions on those platforms.
+- **Live/instant alerts** — this checks hourly, which is close to live
+  but not second-by-second.
