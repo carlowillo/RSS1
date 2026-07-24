@@ -163,4 +163,196 @@ def classify_with_claude(item, issue_names, api_key):
         "https://api.anthropic.com/v1/messages",
         data=body,
         headers={
-            "Content-Type":
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+        text = data["content"][0]["text"]
+        return json.loads(text)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! Claude classification failed, falling back to keywords: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# State (so we don't re-alert on the same article every run)
+# ---------------------------------------------------------------------------
+
+def load_seen():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_seen(seen):
+    with open(STATE_FILE, "w") as f:
+        json.dump(sorted(seen), f)
+
+
+def article_id(item):
+    return hashlib.sha256(item["link"].encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+def build_digest(matched_by_issue):
+    lines = [
+        f"# Christian Concern Monitoring Digest — "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        "",
+    ]
+    if not any(matched_by_issue.values()):
+        lines.append("No new relevant articles found this run.")
+        return "\n".join(lines)
+
+    for issue, articles in matched_by_issue.items():
+        if not articles:
+            continue
+        lines.append(f"## {issue} ({len(articles)})")
+        for a in articles:
+            lines.append(f"- **[{a['title']}]({a['link']})** — {a['source']}")
+            if a["summary"]:
+                snippet = a["summary"][:200]
+                lines.append(f"  {snippet}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+LOG_FILE = "digest_log.md"
+MAX_LOG_ENTRIES = 150  # keeps the file from growing forever; ~150 hourly runs with hits
+
+
+def append_to_log(digest_text, log_path=LOG_FILE, max_entries=MAX_LOG_ENTRIES):
+    """
+    Prepend this run's digest to a running log, newest entry first, so that
+    checking the file at any time shows everything found recently -- not
+    just whatever happened in the single most recent run.
+    """
+    entry = digest_text.strip()
+    existing = ""
+    if os.path.exists(log_path):
+        with open(log_path, encoding="utf-8") as f:
+            existing = f.read()
+
+    separator = "\n\n---\n\n"
+    combined = entry + (separator + existing if existing.strip() else "")
+
+    # Trim to the most recent N entries so the file/repo doesn't grow forever.
+    parts = [p for p in combined.split(separator) if p.strip()]
+    trimmed = parts[:max_entries]
+
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(separator.join(trimmed) + "\n")
+
+
+def send_slack(webhook_url, text):
+    if not webhook_url:
+        return
+    data = json.dumps({"text": text[:3000]}).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url, data=data, headers={"Content-Type": "application/json"}
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! Slack post failed: {e}")
+
+
+def send_email(subject, body, cfg):
+    if not cfg.get("enabled"):
+        return
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = cfg["from_addr"]
+    msg["To"] = cfg["to_addr"]
+    try:
+        with smtplib.SMTP_SSL(cfg["smtp_host"], cfg["smtp_port"]) as server:
+            server.login(cfg["smtp_user"], cfg["smtp_pass"])
+            server.sendmail(cfg["from_addr"], [cfg["to_addr"]], msg.as_string())
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! Email send failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    with open("feeds.yaml") as f:
+        feeds = yaml.safe_load(f)["feeds"]
+    with open("issues.yaml") as f:
+        issues = yaml.safe_load(f)["issues"]
+
+    seen = load_seen()
+
+    all_items = []
+    print(f"Fetching {len(feeds)} RSS feeds...")
+    for feed in feeds:
+        items = fetch_feed(feed)
+        print(f"  {feed['name']}: {len(items)} items")
+        all_items.extend(items)
+
+    guardian_key = os.environ.get("GUARDIAN_API_KEY")
+    if guardian_key:
+        print("Fetching Guardian API...")
+        g_items = fetch_guardian(guardian_key)
+        print(f"  Guardian: {g_items and len(g_items) or 0} items")
+        all_items.extend(g_items)
+
+    new_items = [it for it in all_items if article_id(it) not in seen]
+    print(f"{len(new_items)} new items out of {len(all_items)} fetched")
+
+    claude_key = os.environ.get("ANTHROPIC_API_KEY")  # optional upgrade
+    issue_names = list(issues.keys())
+
+    matched_by_issue = {name: [] for name in issue_names}
+    for item in new_items:
+        matches = None
+        if claude_key:
+            matches = classify_with_claude(item, issue_names, claude_key)
+        if matches is None:  # not using Claude, or the call failed -> free fallback
+            matches = keyword_classify(item, issues)
+        for m in matches:
+            if m in matched_by_issue:
+                matched_by_issue[m].append(item)
+        seen.add(article_id(item))
+
+    digest = build_digest(matched_by_issue)
+    print("\n" + digest)
+
+    # latest_digest.md always shows this run's result (useful for Slack/email/debugging).
+    with open("latest_digest.md", "w", encoding="utf-8") as f:
+        f.write(digest)
+
+    # digest_log.md is the one to bookmark if you're just checking the file yourself:
+    # it accumulates every run that found something, newest first, so you never lose
+    # a finding just because you didn't check in the exact hour it appeared.
+    if any(matched_by_issue.values()):
+        append_to_log(digest)
+
+    if any(matched_by_issue.values()):
+        send_slack(os.environ.get("SLACK_WEBHOOK_URL", ""), digest)
+
+        email_cfg = {
+            "enabled": os.environ.get("EMAIL_ENABLED", "false").lower() == "true",
+            "smtp_host": os.environ.get("SMTP_HOST", ""),
+            "smtp_port": int(os.environ.get("SMTP_PORT", "465")),
+            "smtp_user": os.environ.get("SMTP_USER", ""),
+            "smtp_pass": os.environ.get("SMTP_PASS", ""),
+            "from_addr": os.environ.get("EMAIL_FROM", ""),
+            "to_addr": os.environ.get("EMAIL_TO", ""),
+        }
+        send_email("Christian Concern Monitoring Digest", digest, email_cfg)
+
+    save_seen(seen)
+
+
+if __name__ == "__main__":
+    main()
